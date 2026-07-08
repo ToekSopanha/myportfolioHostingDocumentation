@@ -1,60 +1,55 @@
-# 🚀 MyPortfolio — Deployment Documentation
+# 🚀 MyPortfolio — Build & Deploy Guide
 
 ![Vue](https://img.shields.io/badge/Frontend-Vue.js-42b883?logo=vue.js&logoColor=white)
 ![Node](https://img.shields.io/badge/Backend-Node.js-339933?logo=node.js&logoColor=white)
+![Docker](https://img.shields.io/badge/Deploy-Docker-2496ED?logo=docker&logoColor=white)
 ![Nginx](https://img.shields.io/badge/Server-Nginx-009639?logo=nginx&logoColor=white)
-![PM2](https://img.shields.io/badge/Process%20Manager-PM2-2B037A?logo=pm2&logoColor=white)
-![Ubuntu](https://img.shields.io/badge/OS-Ubuntu-E95420?logo=ubuntu&logoColor=white)
+![Let's Encrypt](https://img.shields.io/badge/SSL-Let's%20Encrypt-003A70?logo=letsencrypt&logoColor=white)
 
-This document describes the full production deployment of **MyPortfolio** — a Vue.js single-page application backed by a Node.js/Express API, served and reverse-proxied through nginx on an Ubuntu server.
-
-| | |
-|---|---|
-| **Live domain** | `myportfolio.sopanha.digital` |
-| **OS** | Ubuntu (DigitalOcean Droplet) |
-| **Frontend** | Vue.js (built with Vite) |
-| **Backend** | Node.js + Express, port `3001` |
-| **Web server** | nginx (static file server + reverse proxy) |
-| **Process manager** | PM2 |
+This guide covers the complete process of building Docker images for MyPortfolio, pushing them to Docker Hub, and deploying them to a server with automatic HTTPS via Let's Encrypt.
 
 ---
 
 ## 📑 Table of Contents
 
-- [1. Architecture Overview](#1-architecture-overview)
-- [2. Project Structure](#2-project-structure)
-- [3. Prerequisites](#3-prerequisites)
-- [4. Step-by-Step Deployment](#4-step-by-step-deployment)
-  - [4.1 Connect to the Server](#41-connect-to-the-server)
-  - [4.2 Update the System & Install Nginx](#42-update-the-system--install-nginx)
-  - [4.3 Install Node.js](#43-install-nodejs)
-  - [4.4 Transfer Project Files](#44-transfer-project-files)
-  - [4.5 Build the Frontend](#45-build-the-frontend)
-  - [4.6 Set Up the Backend](#46-set-up-the-backend)
-  - [4.7 Run the Backend with PM2](#47-run-the-backend-with-pm2)
-  - [4.8 Configure Nginx](#48-configure-nginx)
-  - [4.9 Enable the Site & Test Config](#49-enable-the-site--test-config)
-  - [4.10 Configure the Firewall](#410-configure-the-firewall)
-  - [4.11 Point the Domain (DNS)](#411-point-the-domain-dns)
-  - [4.12 Enable HTTPS](#412-enable-https)
-- [5. Verifying the Deployment](#5-verifying-the-deployment)
-- [6. Troubleshooting Guide](#6-troubleshooting-guide)
-- [7. Maintenance & Redeployment](#7-maintenance--redeployment)
-- [8. Command Cheat Sheet](#8-command-cheat-sheet)
+- [Project Overview](#project-overview)
+- [Prerequisites](#prerequisites)
+- [Local Development](#local-development)
+- [Configure Environment](#configure-environment)
+- [Build Docker Images](#build-docker-images)
+- [Push to Docker Hub](#push-to-docker-hub)
+- [Prepare the Server](#prepare-the-server)
+- [Deploy with Docker Compose](#deploy-with-docker-compose)
+- [Let's Encrypt SSL](#lets-encrypt-ssl)
+- [Verify Deployment](#verify-deployment)
+- [Admin Panel](#admin-panel)
+- [Redeploy After Updates](#redeploy-after-updates)
+- [Hosting Multiple Websites on One Server](#hosting-multiple-websites-on-one-server)
+- [Troubleshooting](#troubleshooting)
+- [Useful Commands](#useful-commands)
 
 ---
 
-## 1. Architecture Overview
+## Project Overview
+
+MyPortfolio is a full-stack personal portfolio website:
+
+- **Frontend**: Vue.js 3 + Vite (served by nginx)
+- **Backend**: Node.js + Express API
+- **Storage**: JSON files + uploaded images (stored in Docker volumes)
+- **Auth**: JWT-protected admin panel
+- **HTTPS**: Automatic Let's Encrypt certificates inside the frontend container
 
 ```
                          ┌─────────────────────────────┐
                          │           Browser            │
                          └───────────────┬───────────────┘
-                                         │ HTTP/HTTPS
+                                         │ HTTP / HTTPS
                                          ▼
                          ┌─────────────────────────────┐
-                         │     nginx (port 80 / 443)    │
+                         │   nginx in Docker container  │
                          │  myportfolio.sopanha.digital │
+                         │      (port 80 / 443)         │
                          └───────────────┬───────────────┘
                                          │
                   ┌──────────────────────┼──────────────────────┐
@@ -62,205 +57,652 @@ This document describes the full production deployment of **MyPortfolio** — a 
                   ▼                                              ▼
    ┌───────────────────────────┐                ┌───────────────────────────┐
    │   Static files (Vue dist) │                │   /api/*  → reverse proxy │
-   │ /var/www/myportfolio/      │                │   http://localhost:3001   │
-   │   frontend/dist            │                └─────────────┬─────────────┘
-   └───────────────────────────┘                                │
-                                                                 ▼
+   │   /usr/share/nginx/html   │                │   http://backend:3001     │
+   └───────────────────────────┘                └─────────────┬─────────────┘
+                                                                │
+                                                                ▼
                                                    ┌───────────────────────────┐
                                                    │   Node.js / Express API   │
-                                                   │   managed by PM2          │
-                                                   │   /var/www/myportfolio/   │
-                                                   │   backend/server.js       │
+                                                   │   (Docker container)      │
+                                                   │      backend:3001         │
                                                    └───────────────────────────┘
 ```
 
-**Design rationale:**
-- The frontend is compiled into static HTML/CSS/JS ahead of time, so nginx can serve it directly with no runtime overhead — fast, and no Node.js needed on the request path.
-- The backend is a long-running Node.js process, kept alive and auto-restarted by PM2, completely decoupled from nginx's own lifecycle.
-- nginx acts as the single entry point on ports 80/443, routing traffic to the right place based on URL path — this means only nginx needs to be exposed to the internet; the backend stays internal on `localhost:3001`.
+---
+
+## Prerequisites
+
+### Local machine
+
+| Tool | Purpose |
+|---|---|
+| Docker Desktop or Docker Engine | Build images |
+| Docker Hub account | Store images |
+| Git (optional) | Version control |
+
+### Server
+
+| Tool | Purpose |
+|---|---|
+| Ubuntu 22.04+ (recommended) | Host OS |
+| Docker + Docker Compose | Run containers |
+| Domain name | Point to server IP |
+| Ports 22, 80, 443 open | SSH, HTTP, HTTPS |
 
 ---
 
-## 2. Project Structure
-
-```
-/var/www/myportfolio/
-├── frontend/
-│   ├── src/                       # Vue source code
-│   ├── public/                    # Static assets used during dev
-│   ├── package.json
-│   ├── vite.config.js
-│   └── dist/                      # ✅ Production build — this is what nginx serves
-│       ├── index.html
-│       ├── favicon.svg
-│       └── assets/
-│           ├── index-[hash].js
-│           └── index-[hash].css
-│
-├── backend/
-│   ├── server.js                  # Entry point — listens on port 3001
-│   ├── routes/
-│   ├── package.json
-│   └── node_modules/              # Installed via `npm install --production`
-│
-└── img/                            # Static images served independently via nginx
-```
-
----
-
-## 3. Prerequisites
-
-| Software | Purpose | Install Command |
-|---|---|---|
-| **nginx** | Web server & reverse proxy | `sudo apt install nginx -y` |
-| **Node.js (v20.x) + npm** | Build frontend, run backend | See [4.3](#43-install-nodejs) |
-| **PM2** | Persistent backend process manager | `sudo npm install -g pm2` |
-| **Certbot** | Free SSL/TLS certificates | `sudo apt install certbot python3-certbot-nginx -y` |
-| **ufw** | Server-level firewall | Pre-installed on most Ubuntu images |
-
----
-
-## 4. Step-by-Step Deployment
-
-### 4.1 Connect to the Server
+## Local Development
 
 ```bash
-ssh 
+# Backend
+npm install
+npm run dev
 ```
 
-> Replace with your actual user if not using `root`.
+```bash
+# Frontend
+npm install
+npm run dev
+```
+
+Backend runs on `http://localhost:3001`.  
+Frontend runs on `http://localhost:5173`.
+
+Admin panel: `http://localhost:5173/admin`  
+Default password: ``
 
 ---
 
-### 4.2 Update the System & Install Nginx
+## Configure Environment
+
+Create a `.env` file at the project root:
+
+```bash
+JWT_SECRET=your_very_strong_random_string
+DOMAIN=myportfolio.sopanha.digital
+EMAIL=your-email@example.com
+```
+
+| Variable | Required | Description |
+|---|---|---|
+| `JWT_SECRET` | Yes | Strong random string for JWT signing. Change in production. |
+| `DOMAIN` | Yes | Your domain name. Used by Let's Encrypt and nginx. |
+| `EMAIL` | Yes | Your email for Let's Encrypt notifications. |
+
+> ⚠️ **Never commit `.env` to Git.** `.env.example` is provided as a template.
+
+Set your domain in the frontend nginx config:
+
+```bash
+# frontend/nginx.conf
+server_name myportfolio.sopanha.digital;
+```
+
+---
+
+## Build Docker Images
+
+Open a terminal in the project root.
+
+### Build backend image
+
+```bash
+cd backend
+docker build -t yourdockerhubusername/portfolio-backend:latest .
+cd ..
+```
+
+### Build frontend image
+
+```bash
+cd frontend
+docker build -t yourdockerhubusername/portfolio-frontend:latest .
+cd ..
+```
+
+Replace `yourdockerhubusername` with your actual Docker Hub username.
+
+### Verify images exist
+
+```bash
+docker images
+```
+
+You should see:
+- `yourdockerhubusername/portfolio-backend`
+- `yourdockerhubusername/portfolio-frontend`
+
+---
+
+## Push to Docker Hub
+
+Login to Docker Hub:
+
+```bash
+docker login
+```
+
+Push both images:
+
+```bash
+docker push yourdockerhubusername/portfolio-backend:latest
+docker push yourdockerhubusername/portfolio-frontend:latest
+```
+
+---
+
+## Prepare the Server
+
+### 1. Connect to the server
+
+```bash
+ssh root@your_server_ip
+```
+
+### 2. Update system
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install nginx -y
-sudo systemctl enable nginx
-sudo systemctl start nginx
 ```
 
-**Verify:** visit `ServerIP` in a browser — you should see the default "Welcome to nginx!" page at this point. This confirms nginx is installed and running before any custom config is applied.
+### 3. Install Docker
 
 ```bash
-sudo systemctl status nginx
+sudo apt install -y docker.io docker-compose-plugin
+sudo systemctl enable docker
+sudo systemctl start docker
 ```
 
-Expected output should show `active (running)`.
+Add your user to the docker group (optional):
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+### 4. Open firewall ports
+
+```bash
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+```
+
+> If you use a cloud provider (DigitalOcean, AWS, Azure, etc.), also open ports 80 and 443 in their dashboard firewall/security group.
 
 ---
 
-### 4.3 Install Node.js
+## Deploy with Docker Compose
+
+### 1. Create deployment directory
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
+sudo mkdir -p /var/www/myportfolio
+cd /var/www/myportfolio
 ```
 
-**Verify:**
+### 2. Create `docker-compose.yml`
+
+```yaml
+services:
+  backend:
+    image: yourdockerhubusername/portfolio-backend:latest
+    container_name: portfolio-backend
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /app/data
+      PORT: 3001
+      CORS_ORIGIN: https://myportfolio.sopanha.digital
+      JWT_SECRET: ${JWT_SECRET}
+    volumes:
+      - portfolio-data:/app/data
+      - backend-uploads:/app/uploads
+    ports:
+      - "3001:3001"
+
+  frontend:
+    image: yourdockerhubusername/portfolio-frontend:latest
+    container_name: portfolio-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      EMAIL: ${EMAIL}
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+
+volumes:
+  portfolio-data:
+  backend-uploads:
+  letsencrypt:
+```
+
+### 3. Create `.env`
 
 ```bash
-node -v     # e.g. v20.x.x
-npm -v      # e.g. 10.x.x
+nano .env
 ```
+
+```bash
+JWT_SECRET=your_very_strong_random_string
+DOMAIN=myportfolio.sopanha.digital
+EMAIL=your-email@example.com
+```
+
+### 4. Point domain DNS
+
+In your domain registrar or DNS provider, create an A record:
+
+| Type | Name | Value |
+|---|---|---|
+| A | `myportfolio` or `@` | `your_server_ip` |
+
+Wait for DNS propagation. Verify with:
+
+```bash
+nslookup myportfolio.sopanha.digital
+```
+
+### 5. Pull and run
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+### 6. Check logs
+
+```bash
+docker compose logs -f frontend
+```
+
+On first run, the frontend container will request a Let's Encrypt SSL certificate. You should see success messages in the logs.
 
 ---
 
-### 4.4 Transfer Project Files
+## Let's Encrypt SSL
 
-From your **local machine**, copy the project to the server:
+This project uses **Let's Encrypt** to provide free, automatic SSL certificates for HTTPS.
+
+### How it works
+
+1. **Certbot inside the frontend container**
+   - The frontend Docker image installs `certbot` and the `certbot-nginx` plugin.
+   - When the container starts, the `frontend/entrypoint.sh` script runs.
+
+2. **First certificate request**
+   - The script checks if a certificate already exists at `/etc/letsencrypt/live/$DOMAIN/`.
+   - If not, it runs:
+     ```bash
+     certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --no-eff-email
+     ```
+   - Certbot proves domain ownership using the **HTTP-01 challenge**: it temporarily serves a verification file on port 80.
+   - If successful, Let's Encrypt issues the certificate.
+
+3. **Nginx configuration**
+   - The `certbot-nginx` plugin automatically modifies `nginx.conf` to add the HTTPS server block on port 443.
+   - It also redirects HTTP traffic on port 80 to HTTPS.
+
+4. **Certificate storage**
+   - Certificates are stored in `/etc/letsencrypt/`.
+   - This directory is mounted to the Docker volume `letsencrypt` so certificates survive container restarts.
+
+5. **Automatic renewal**
+   - After nginx starts, the entrypoint script runs `certbot renew --quiet --nginx` every 12 hours.
+   - Let's Encrypt certificates are valid for 90 days. Certbot renews them automatically before expiry.
+
+### Requirements for Let's Encrypt
+
+| Requirement | Why |
+|---|---|
+| Domain must resolve to server IP | Let's Encrypt needs to reach your server |
+| Port 80 must be open | HTTP-01 challenge uses port 80 |
+| Port 443 must be open | HTTPS traffic uses port 443 |
+| Valid `DOMAIN` env var | Certbot requests a cert for this domain |
+| Valid `EMAIL` env var | Let's Encrypt sends expiry notices here |
+
+### View certificate details
+
+Inside the running container:
 
 ```bash
-scp -r frontend root@159.223.78.106:/var/www/myportfolio/
-scp -r backend root@159.223.78.106:/var/www/myportfolio/
-scp -r img root@159.223.78.106:/var/www/myportfolio/
+docker exec portfolio-frontend certbot certificates
 ```
 
-> Alternatively, use `git clone` directly on the server if the project is in a Git repository.
+Output example:
+```
+Found the following certs:
+  Certificate Name: myportfolio.sopanha.digital
+    Domains: myportfolio.sopanha.digital
+    Expiry Date: 2026-10-05 (VALID: 89 days)
+    Certificate Path: /etc/letsencrypt/live/myportfolio.sopanha.digital/fullchain.pem
+    Private Key Path: /etc/letsencrypt/live/myportfolio.sopanha.digital/privkey.pem
+```
+
+### Force certificate renewal
+
+```bash
+docker exec portfolio-frontend certbot renew --force-renewal --nginx
+```
+
+### Reset and reissue certificate
+
+If you change domains or need a fresh certificate:
+
+```bash
+cd /var/www/myportfolio
+docker compose down
+docker volume rm myportfolio_letsencrypt
+docker compose up -d
+```
+
+The container will request a new certificate on startup.
+
+### Common certificate errors
+
+| Error | Cause | Fix |
+|---|---|---|
+| `Connection refused` on port 80 | Firewall blocking | Open port 80 on server and cloud provider |
+| `Could not resolve host` | DNS not propagated | Wait for DNS, verify with `nslookup` |
+| `Unauthorized` | Domain points to wrong IP | Check A record |
+| `Too many failed authorizations` | Rate limit hit | Wait 1 hour and try again |
+| Cert not renewed automatically | Container stopped too long | Start container and run `certbot renew` manually |
+
+### Rate limits
+
+Let's Encrypt has rate limits:
+- **50 certificates per registered domain per week**
+- **5 duplicate certificates per week** for the exact same domain
+
+Avoid repeatedly deleting and reissuing certificates unnecessarily.
 
 ---
 
-### 4.5 Build the Frontend
+## Verify Deployment
 
-```bash
-cd /var/www/myportfolio/frontend
-npm install
-npm run build
-```
-
-This compiles the Vue app into the `dist/` folder — plain static HTML/CSS/JS, requiring **no Node.js runtime** to serve afterward.
-
-**Verify:**
-
-```bash
-ls /var/www/myportfolio/frontend/dist
-cat /var/www/myportfolio/frontend/dist/index.html
-```
-
-The output should reference hashed asset files, e.g.:
-
-```html
-<script type="module" crossorigin src="/assets/index-DJ7wh-1S.js"></script>
-<link rel="stylesheet" crossorigin href="/assets/index-4C8ebk0s.css">
-```
+| URL | Expected Result |
+|---|---|
+| `http://myportfolio.sopanha.digital` | Redirects or serves site |
+| `https://myportfolio.sopanha.digital` | Site loads with valid SSL |
+| `https://myportfolio.sopanha.digital/api/health` | `{"status":"OK"}` |
+| `https://myportfolio.sopanha.digital/admin` | Admin login page |
 
 ---
 
-### 4.6 Set Up the Backend
+## Admin Panel
 
-```bash
-cd /var/www/myportfolio/backend
-npm install --production
-```
+1. Visit `https://myportfolio.sopanha.digital/admin`
+2. Login with password: `admin123`
+3. You can now manage:
+   - **Projects** — add/edit/delete with image uploads
+   - **Skills** — add/edit/delete
+   - **About / Hero** — edit text, upload profile photo, upload CV PDF
+   - **Contact** — edit email, phone, location, social links
 
-Identify the entry file and listening port:
-
-```bash
-cat package.json | grep main          # "main": "server.js"
-grep -n "PORT" server.js              # const PORT = process.env.PORT || 3001;
-```
+> ⚠️ Change the admin password in `backend/routes/auth.js` before going live.
 
 ---
 
-### 4.7 Run the Backend with PM2
+## Redeploy After Updates
+
+Whenever you change code and want to update the live site:
+
+### 1. Rebuild locally
 
 ```bash
-sudo npm install -g pm2
-pm2 start server.js --name myportfolio-backend
-pm2 save
-pm2 startup
+cd backend
+docker build -t yourdockerhubusername/portfolio-backend:latest .
+cd ../frontend
+docker build -t yourdockerhubusername/portfolio-frontend:latest .
+cd ..
 ```
 
-Run whatever command `pm2 startup` prints — this registers PM2 with `systemd` so the backend restarts automatically on server reboot.
-
-**Verify:**
+### 2. Push to Docker Hub
 
 ```bash
-pm2 status
+docker push yourdockerhubusername/portfolio-backend:latest
+docker push yourdockerhubusername/portfolio-frontend:latest
 ```
 
-Expected:
-
-```
-┌────┬────────────────────┬──────────┬──────┬───────────┬──────────┬──────────┐
-│ id │ name               │ mode     │ ↺    │ status    │ cpu      │ memory   │
-├────┼────────────────────┼──────────┼──────┼───────────┼──────────┼──────────┤
-│ 0  │ myportfolio-backend│ fork     │ 0    │ online    │ 0%       │ 62.1mb   │
-└────┴────────────────────┴──────────┴──────┴───────────┴──────────┴──────────┘
-```
-
-Test the backend directly, bypassing nginx entirely:
+### 3. Update server
 
 ```bash
-curl http://localhost:3001/api/projects
+ssh root@your_server_ip
+cd /var/www/myportfolio
+docker compose pull
+docker compose up -d
 ```
 
-A valid JSON response confirms the backend itself is healthy, independent of any nginx configuration.
+Data and uploaded files persist in Docker volumes, so they won't be lost.
 
 ---
 
-### 4.8 Configure Nginx
+## Hosting Multiple Websites on One Server
+
+Your server has one IP address. When someone visits `myportfolio.com` or `othersite.com`, both domains can point to that same IP. Both requests arrive at the same server doors: port `80` (HTTP) and port `443` (HTTPS).
+
+You need a **reverse proxy** — like a doorman — that checks the domain name and sends each visitor to the right website.
+
+### The simple rule
+
+- **Backend containers** must use different host ports: `3001`, `3002`, `3003`, etc.
+- **Frontend containers** always listen on port `80` inside their container, but on the host they must either:
+  - Use a reverse proxy like **Traefik** (no host port needed)
+  - Use different host ports like `8080`, `8081` with host nginx
+
+### Example: two websites on one server
+
+| Website | Backend host port | Frontend host port | Domain |
+|---|---|---|---|
+| MyPortfolio | `3001` | `80` via Traefik | `myportfolio.com` |
+| OtherSite | `3002` | `80` via Traefik | `othersite.com` |
+
+With Traefik, both frontends share port `80` and `443` because Traefik routes by domain name internally.
+
+---
+
+### Option 1: Use Traefik (Recommended)
+
+Traefik is a reverse proxy made for Docker. It handles domain routing and SSL automatically.
+
+#### 1. Create a shared Docker network
+
+```bash
+docker network create web
+```
+
+#### 2. Run Traefik
+
+Create `/var/www/traefik/docker-compose.yml`:
+
+```yaml
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=your-email@example.com"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+```
+
+Start it:
+
+```bash
+cd /var/www/traefik
+docker compose up -d
+```
+
+#### 3. Update MyPortfolio compose file
+
+Remove the `80:80` and `443:443` port mappings from the `frontend` service. Add Traefik labels and the shared network.
+
+```yaml
+services:
+  backend:
+    image: yourdockerhubusername/portfolio-backend:latest
+    container_name: portfolio-backend
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /app/data
+      PORT: 3001
+      CORS_ORIGIN: https://myportfolio.sopanha.digital
+      JWT_SECRET: ${JWT_SECRET}
+    volumes:
+      - portfolio-data:/app/data
+      - backend-uploads:/app/uploads
+    ports:
+      - "3001:3001"
+    networks:
+      - web
+
+  frontend:
+    image: yourdockerhubusername/portfolio-frontend:latest
+    container_name: portfolio-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portfolio.rule=Host(`myportfolio.sopanha.digital`)"
+      - "traefik.http.routers.portfolio.entrypoints=websecure"
+      - "traefik.http.routers.portfolio.tls.certresolver=letsencrypt"
+      - "traefik.http.services.portfolio.loadbalancer.server.port=80"
+    environment:
+      DOMAIN: ${DOMAIN}
+      EMAIL: ${EMAIL}
+
+volumes:
+  portfolio-data:
+  backend-uploads:
+
+networks:
+  web:
+    external: true
+```
+
+> With Traefik handling SSL, the certbot inside the frontend image is not needed. You can keep it or build a clean nginx-only frontend image.
+
+#### 4. Add a second website
+
+Create another folder, for example `/var/www/othersite`, with this `docker-compose.yml`:
+
+```yaml
+services:
+  backend:
+    image: yourdockerhubusername/other-backend:latest
+    container_name: other-backend
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /app/data
+      PORT: 3001
+      CORS_ORIGIN: https://othersite.com
+      JWT_SECRET: ${JWT_SECRET}
+    volumes:
+      - other-data:/app/data
+      - other-uploads:/app/uploads
+    ports:
+      - "3002:3001"
+    networks:
+      - web
+
+  frontend:
+    image: yourdockerhubusername/other-frontend:latest
+    container_name: other-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.othersite.rule=Host(`othersite.com`)"
+      - "traefik.http.routers.othersite.entrypoints=websecure"
+      - "traefik.http.routers.othersite.tls.certresolver=letsencrypt"
+      - "traefik.http.services.othersite.loadbalancer.server.port=80"
+
+volumes:
+  other-data:
+  other-uploads:
+
+networks:
+  web:
+    external: true
+```
+
+Important differences from MyPortfolio:
+- Backend host port is `3002` instead of `3001`
+- Container name is `other-backend` / `other-frontend`
+- Traefik router name is `othersite`
+- Domain is `othersite.com`
+
+Start it:
+
+```bash
+cd /var/www/othersite
+docker compose up -d
+```
+
+Now both websites share ports `80` and `443` on the server, and Traefik sends visitors to the right container based on the domain.
+
+---
+
+### Option 2: Use Host Nginx as Reverse Proxy
+
+If you prefer not to use Traefik, install nginx directly on the server and route domains to different container ports.
+
+#### 1. Install nginx on the host
+
+```bash
+sudo apt install -y nginx
+```
+
+#### 2. Use different frontend host ports
+
+For MyPortfolio:
+
+```yaml
+frontend:
+  ports:
+    - "8080:80"
+```
+
+For OtherSite:
+
+```yaml
+frontend:
+  ports:
+    - "8081:80"
+```
+
+#### 3. Create nginx config for each site
+
+MyPortfolio:
 
 ```bash
 sudo nano /etc/nginx/sites-available/myportfolio
@@ -271,218 +713,199 @@ server {
     listen 80;
     server_name myportfolio.sopanha.digital;
 
-    root /var/www/myportfolio/frontend/dist;
-    index index.html;
-
-    # Serve the Vue SPA — fallback to index.html for client-side routing
     location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Serve static images
-    location /img/ {
-        alias /var/www/myportfolio/img/;
-    }
-
-    # Reverse proxy API requests to the Node.js backend
-    location /api/ {
-        proxy_pass http://localhost:3001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
+        proxy_pass http://localhost:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
     }
 }
 ```
 
-<details>
-<summary>📌 Why each directive matters (click to expand)</summary>
+OtherSite:
 
-| Directive | Purpose |
-|---|---|
-| `try_files $uri $uri/ /index.html;` | Without this, refreshing on a Vue Router route like `/about` returns a 404, since nginx looks for a literal file named `about`. This falls back to `index.html` and lets Vue Router take over. |
-| `alias /var/www/myportfolio/img/;` | Serves the `img/` folder independently of the frontend build. |
-| `proxy_pass http://localhost:3001;` | Forwards `/api/*` requests to the Node.js backend. The port **must** match the backend's actual listening port exactly. |
-| `proxy_set_header Upgrade/Connection` | Required if the backend uses WebSockets (e.g. Socket.io); without these, WebSocket connections fail silently. |
+```bash
+sudo nano /etc/nginx/sites-available/othersite
+```
 
-</details>
+```nginx
+server {
+    listen 80;
+    server_name othersite.com;
 
----
+    location / {
+        proxy_pass http://localhost:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
 
-### 4.9 Enable the Site & Test Config
+Enable both:
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/myportfolio /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
+sudo ln -s /etc/nginx/sites-available/othersite /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-`nginx -t` should output:
-
-```
-nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
-nginx: configuration file /etc/nginx/nginx.conf test is successful
-```
-
----
-
-### 4.10 Configure the Firewall
-
-**Server-level (ufw):**
+#### 4. Add SSL with Certbot on host
 
 ```bash
-sudo ufw status
-sudo ufw allow 'Nginx Full'
-sudo ufw reload
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d myportfolio.sopanha.digital -d othersite.com
 ```
-
-**Cloud provider firewall (DigitalOcean):**
-
-Go to **DigitalOcean Dashboard → Networking → Firewalls** and confirm inbound rules allow:
-
-| Type | Protocol | Port | Source |
-|---|---|---|---|
-| HTTP | TCP | 80 | All IPv4, All IPv6 |
-| HTTPS | TCP | 443 | All IPv4, All IPv6 |
-| SSH | TCP | 22 | Your IP (recommended) |
-
-> ⚠️ This is a separate layer from `ufw` and is one of the most common reasons a server is unreachable externally even when everything *inside* the server checks out fine.
 
 ---
 
-### 4.11 Point the Domain (DNS)
+### Option 3: Use Different Ports (Testing only)
 
-In your domain registrar / DNS provider, add an **A record**:
+Run the second website on non-standard ports:
 
-| Type | Name | Value |
+```yaml
+frontend:
+  ports:
+    - "8080:80"
+    - "8443:443"
+```
+
+Then access it at `http://your-server-ip:8080`. This is not recommended for real domains because users have to type the port number.
+
+---
+
+### Which option should you choose?
+
+| Option | Best when | Difficulty |
 |---|---|---|
-| A | `myportfolio` (or `@`) | `ServerIP` |
+| **Traefik** | Hosting many websites, want automatic SSL | Medium |
+| **Host nginx** | You prefer full manual control | Medium |
+| **Different ports** | Quick testing only | Easy |
 
-Verify propagation:
+For most people, **Traefik** is the best long-term choice.
+
+---
+
+## Troubleshooting
+
+### Domain doesn't resolve
 
 ```bash
 nslookup myportfolio.sopanha.digital
 ```
 
-Expected:
+Wait for DNS propagation. Can take a few minutes to 24 hours.
 
+### Let's Encrypt fails
+
+Make sure:
+- Port 80 is open
+- Domain points to the server IP
+- No other service is using port 80
+
+Check logs:
+```bash
+docker compose logs -f frontend
 ```
-Non-authoritative answer:
-Name:    myportfolio.sopanha.digital
-Address: ServerIP
+
+### Certificate renewal
+
+The frontend container runs `certbot renew` automatically every 12 hours. To renew manually:
+
+```bash
+docker exec portfolio-frontend certbot renew --nginx
+```
+
+### Reset SSL certificate
+
+```bash
+cd /var/www/myportfolio
+docker compose down
+docker volume rm myportfolio_letsencrypt
+docker compose up -d
+```
+
+### Reset all data
+
+⚠️ This deletes all projects, skills, settings, uploads, and CV.
+
+```bash
+cd /var/www/myportfolio
+docker compose down
+docker volume rm myportfolio_portfolio-data myportfolio_backend-uploads myportfolio_letsencrypt
+docker compose up -d
 ```
 
 ---
 
-### 4.12 Enable HTTPS
+## Useful Commands
 
 ```bash
-sudo certbot --nginx -d myportfolio.sopanha.digital
-```
+# View running containers
+docker ps
 
-Certbot automatically:
-- Obtains a free SSL certificate from Let's Encrypt
-- Edits the nginx config to add a `listen 443 ssl;` block
-- Sets up a scheduled task for automatic renewal
+# View all logs
+docker compose logs
 
-**Verify auto-renewal:**
+# View frontend logs
+docker compose logs -f frontend
 
-```bash
-sudo certbot renew --dry-run
-```
+# View backend logs
+docker compose logs -f backend
 
----
+# Restart services
+docker compose restart
 
-## 5. Verifying the Deployment
+# Stop everything
+docker compose down
 
-Run through this checklist after deployment:
+# Enter backend container
+docker exec -it portfolio-backend sh
 
-- [ ] `curl http://localhost:3001/api/projects` returns valid JSON (backend healthy)
-- [ ] `curl -s http://myportfolio.sopanha.digital` returns the Vue `index.html` (not the default nginx page)
-- [ ] `nslookup myportfolio.sopanha.digital` resolves to `159.223.78.106`
-- [ ] `pm2 status` shows `myportfolio-backend` as `online`
-- [ ] Visiting `https://myportfolio.sopanha.digital` in a browser loads the site with a valid SSL padlock
-- [ ] Refreshing on a non-root route (e.g. `/projects`) does **not** return a 404
+# Enter frontend container
+docker exec -it portfolio-frontend sh
 
----
+# Backup data volume
+docker run --rm -v myportfolio_portfolio-data:/data -v $(pwd):/backup alpine tar czf /backup/portfolio-data.tar.gz -C /data .
 
-## 6. Troubleshooting Guide
-
-| Symptom | Likely Cause | Resolution |
-|---|---|---|
-| Default "Welcome to nginx!" page shown | Old default site still enabled, or wrong `root` path | `sudo rm /etc/nginx/sites-enabled/default`; verify `root` matches `dist/` path |
-| `502 Bad Gateway` on API calls | `proxy_pass` port mismatch | Run `grep PORT server.js`, align with `proxy_pass` in nginx config |
-| `404` on page refresh (e.g. `/about`) | Missing SPA fallback | Add `try_files $uri $uri/ /index.html;` |
-| Domain doesn't resolve | DNS not propagated, or missing A record | `nslookup yourdomain.com`; check registrar's DNS settings |
-| Site unreachable despite correct nginx + DNS | Cloud firewall blocking ports 80/443 | Check cloud provider's firewall/security group dashboard |
-| `npm run build` fails referencing `#` character | Project path contains `#` | Rename directory to remove special characters |
-| PM2 shows `online` but app doesn't respond | App crashed internally but PM2 hasn't flagged it yet | `pm2 logs myportfolio-backend --lines 50` to inspect actual errors |
-| WebSocket connections drop | Missing `Upgrade`/`Connection` headers in proxy config | Add the WebSocket-related `proxy_set_header` lines shown in [4.8](#48-configure-nginx) |
-
----
-
-## 7. Maintenance & Redeployment
-
-**Updating the frontend:**
-
-```bash
-cd /var/www/myportfolio/frontend
-git pull            # if using version control
-npm install
-npm run build
-# No restart needed — nginx serves the new dist/ immediately
-```
-
-**Updating the backend:**
-
-```bash
-cd /var/www/myportfolio/backend
-git pull
-npm install --production
-pm2 restart myportfolio-backend
-```
-
-**Applying nginx config changes:**
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
+# Restore data volume
+docker run --rm -v myportfolio_portfolio-data:/data -v $(pwd):/backup alpine sh -c "cd /data && tar xzf /backup/portfolio-data.tar.gz"
 ```
 
 ---
 
-## 8. Command Cheat Sheet
+## Project Structure
 
-```bash
-# nginx
-sudo systemctl status nginx
-sudo systemctl reload nginx
-sudo nginx -t
-tail -f /var/log/nginx/error.log
-
-# PM2
-pm2 status
-pm2 logs myportfolio-backend
-pm2 restart myportfolio-backend
-pm2 stop myportfolio-backend
-
-# Networking
-ufw status
-ss -tlnp | grep :80
-nslookup myportfolio.sopanha.digital
-curl -I http://myportfolio.sopanha.digital
-
-# SSL
-sudo certbot renew --dry-run
 ```
+myportfolio/
+├── backend/
+│   ├── Dockerfile
+│   ├── server.js
+│   ├── routes/
+│   ├── data/          # Default local data (kept in repo)
+│   └── uploads/       # Uploads directory
+├── frontend/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── entrypoint.sh  # Certbot + nginx
+│   └── src/
+├── docker-compose.yml
+├── .env.example
+├── DOCKER.md          # Detailed Docker reference
+└── README.md          # This file
+```
+
+---
+
+## Security Notes
+
+- Change the default admin password before production.
+- Use a strong, random `JWT_SECRET`.
+- Keep `.env` out of Git.
+- Regularly update base images and dependencies.
+- The backend API port `3001` is exposed to the server. Only ports 80 and 443 need to be open to the internet.
 
 ---
 
 <p align="center">
-  <sub>Maintained by Toek Sopanha · Software Engineer | Network Engineer | Cloud/DevOps Engineer</sub>
+  <sub>Built and deployed with Docker + Let's Encrypt</sub>
 </p>
